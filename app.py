@@ -4,7 +4,9 @@ from tkinter import ttk
 import requests
 import pandas as pd
 import numpy as np
-import json
+import PIL
+from PIL import Image
+from io import BytesIO
 
 class App(ctk.CTk):
     def __init__(self, db):
@@ -128,8 +130,21 @@ class Recscreen:
 
         self.rec_frame=ctk.CTkFrame(self.parent)
         self.rec_frame.pack(padx=10, pady=10, fill="both", expand=True)
-        self.canvas=ctk.CTkCanvas(self.rec_frame)
-        self.canvas.pack(fill="both", expand=True)
+        self.rec_tree=ttk.Treeview(self.rec_frame, columns=('Name', 'Match'))
+        self.rec_tree.heading('Name', text="Name")
+        self.rec_tree.heading('Match', text="Match")
+        self.rec_tree['show']='headings'
+        self.rec_tree.bind("<<TreeviewSelect>>", self.match_treeview)
+        self.rec_tree.pack(fill="both", expand=True, side="left")
+        # Treeview on select item, update image and info frame
+
+        self.rec_info_frame=ctk.CTkFrame(self.rec_frame, width=200)
+        self.rec_info_frame.pack(side="right", fill="y", expand=False)
+        self.rec_info_image_frame=ctk.CTkFrame(self.rec_info_frame)
+        self.rec_info_info_frame=ctk.CTkFrame(self.rec_info_frame)
+        self.rec_info_image_frame.pack(side="top", fill="both", expand=True)
+        self.rec_info_info_frame.pack(side="top", fill="both", expand=True)
+
 
         self.tree=ttk.Treeview(self.search_frame, columns=('Artist', 'Title', 'Album', 'Genre', 'MB Id'), height=5)
         self.tree.heading('Title', text='Track')
@@ -226,7 +241,7 @@ class Recscreen:
                 print("Error: Wrong Recommendation Type")
                 results=[]
             if results:
-                list.append(pd.DataFrame(results, columns=['name', 'match']))
+                list.append(pd.DataFrame(results, columns=['name', 'match', 'mbid']))
             else:
                 print("Error getting recommendations")
                 return None
@@ -239,16 +254,11 @@ class Recscreen:
             recommendations=recommendations.drop_duplicates(subset='name', keep=False)
             recommendations=pd.concat([recommendations, merged_duplicates], ignore_index=True)
             recommendations=recommendations.sort_values(by='match', ascending=False)
-        
-        print(recommendations.head())
-        
-    def create_card(self):
-        card_frame=ctk.CTkFrame(self.canvas, border_width=2)
-        card_frame.pack(padx=10, pady=10, fill="both", expand=True)
-        label=ctk.CTkLabel(card_frame, text="TEST")
-        label.pack()
-        self.canvas.create_window(0,0,anchor="nw",window=card_frame)
-        self.canvas.update_idletasks()
+        data=[tuple(row) for row in recommendations.values]
+        for row in data:
+            self.rec_tree.insert("", "end", values=row)
+        # Fill treeview instead
+        # Add extra info to dataframe
         
     def process_item(self, item):
         artist=item[0]
@@ -284,6 +294,7 @@ class Recscreen:
         artist, track, _, _, _=self.process_item(item)
         url=f"http://ws.audioscrobbler.com/2.0/?method=track.getsimilar&artist={artist}&track={track}&api_key={self.api_key}&format=json"
         data=self.lastfm_query(url)
+        print(url)
         data=data.json()
         if 'similartracks' in data:
             if 'track' in data['similartracks']:
@@ -300,6 +311,54 @@ class Recscreen:
         print(f"Albums for: {item}")
         artist, track, album, genre, mbid=self.process_item(item)
 
+    def match_treeview(self, event):
+        for widget in self.rec_info_image_frame.winfo_children():
+            widget.destroy()
+        selected_item=self.rec_tree.selection()
+        if len(selected_item) == 1:
+            mbid=self.rec_tree.item(selected_item, "values")[2]
+        else:
+            print("Too Many Items Selected")
+            return None
+        print(mbid)
+        artist, album, genres, cover=self.get_recommendation_info(mbid)
+        response=requests.get(cover)
+        data=response.content
+        img=None
+        try:
+            img=Image.open(BytesIO(data))
+        except PIL.UnidentifiedImageError as e:
+            print(f"No image found at {cover}:\n{e}")
+        if img:
+            photo=ctk.CTkImage(img, size=(150,150))
+            label=ctk.CTkLabel(self.rec_info_image_frame, image=photo, text="", width=100)
+            label.pack(padx=10, pady=10, fill="both", expand=True)
+        else:
+            label=ctk.CTkLabel(self.rec_info_image_frame, text="No Image Found")
+            label.pack(padx=10, pady=10)
+        
+
+    def get_recommendation_info(self, mbid):
+        mb_url=f"https://musicbrainz.org/ws/2/recording/{mbid}?inc=artists+releases+genres&fmt=json"
+        mb_response=requests.get(mb_url)
+        if mb_response.status_code == 200:
+            mb_data=mb_response.json()
+            album_name=mb_data['releases'][0]['title']
+            album_id=mb_data['releases'][0]['id']
+            artist_name=mb_data['artist-credit'][0]['artist']['name']
+            genres=[]
+            for genre in mb_data['genres']:
+                genres.append(genre["name"])
+            if album_id:
+                ca_url=f"https://coverartarchive.org/release/{album_id}/front"
+            else:
+                ca_url=None
+        else:
+            print("Music Brainz recording not found")
+            return None, None, None, None
+        return artist_name, album_name, genres, ca_url
+
+        
     # Default is to recommend based on entire library.
     # Small window at the top ot let you limit what we recommend based on (search, then multiselect, select all button)
     # Larger window at bottom that shows card view for recommendations, pulling title, artist, genre, and album cover art from spotify/musicbrainz
